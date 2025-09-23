@@ -1,3 +1,5 @@
 # Notebook
 
 [Load Data from Github] (https://colab.research.google.com/drive/1xeI4OrUiHDqLLam4EZRUQDJIn-0lWXa3?usp=sharing)
+
+https://smartfishid-puckdar.gamma.site/ alexnet 
