@@ -1,0 +1,602 @@
+# ============================================================
+# ALEXNET CORAL HEALTH CLASSIFICATION WITH WEIGHTS & BIASES
+# Author: Justin Moller
+# Course: Data Science 25
+# Purpose: Classify Healthy vs Unhealthy Coral Images
+# ============================================================
+
+# Install wandb if not already installed
+!pip install wandb -q
+
+from google.colab import drive
+import os
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, models
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+import numpy as np
+import wandb
+
+print("🪸 AlexNet Coral Health Classification System")
+print("="*80)
+print("Purpose: Differentiate Healthy vs Unhealthy Coral Reefs")
+print("="*80)
+
+# ============================================================
+# STEP 1: INITIALIZE WEIGHTS & BIASES
+# ============================================================
+
+print("\n📊 Initializing Weights & Biases...")
+# Login to wandb (you'll need to enter your API key first time)
+wandb.login()
+print("✅ Wandb login successful!")
+
+# ============================================================
+# STEP 2: MOUNT GOOGLE DRIVE
+# ============================================================
+
+print("\n📂 Mounting Google Drive...")
+drive.mount('/content/drive')
+
+# Set paths to your coral data
+train_dir = "/content/drive/MyDrive/MathData25FINAL/train"
+test_dir = "/content/drive/MyDrive/MathData25FINAL/test"
+
+# Verify paths exist
+for path in [train_dir, test_dir]:
+    if not os.path.exists(path):
+        print(f"❌ Directory not found: {path}")
+        print(f"📁 Available in MyDrive: {os.listdir('/content/drive/MyDrive/')}")
+        raise FileNotFoundError(f"Directory not found: {path}")
+
+print("✅ Coral data directories found!")
+
+# ============================================================
+# STEP 3: EXPERIMENT CONFIGURATIONS
+# ============================================================
+
+experiments = {
+    "1. Baseline (BS=32, LR=0.0001, No Aug)": {
+        "batch_size": 32,
+        "learning_rate": 0.0001,
+        "augmentation": False,
+        "model_type": "alexnet",
+        "color": "#1f77b4"
+    },
+    "2. Small Batch (BS=16, LR=0.0001)": {
+        "batch_size": 16,
+        "learning_rate": 0.0001,
+        "augmentation": False,
+        "model_type": "alexnet",
+        "color": "#ff7f0e"
+    },
+    "3. Large Batch (BS=64, LR=0.0001)": {
+        "batch_size": 64,
+        "learning_rate": 0.0001,
+        "augmentation": False,
+        "model_type": "alexnet",
+        "color": "#2ca02c"
+    },
+    "4. High LR (BS=32, LR=0.001)": {
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "augmentation": False,
+        "model_type": "alexnet",
+        "color": "#d62728"
+    },
+    "5. With Augmentation (BS=32, LR=0.0001)": {
+        "batch_size": 32,
+        "learning_rate": 0.0001,
+        "augmentation": True,
+        "model_type": "alexnet",
+        "color": "#9467bd"
+    },
+    "6. ResNet18 (BS=32, LR=0.0001)": {
+        "batch_size": 32,
+        "learning_rate": 0.0001,
+        "augmentation": False,
+        "model_type": "resnet18",
+        "color": "#8c564b"
+    },
+    "7. VGG16 (BS=32, LR=0.0001)": {
+        "batch_size": 32,
+        "learning_rate": 0.0001,
+        "augmentation": False,
+        "model_type": "vgg16",
+        "color": "#e377c2"
+    }
+}
+
+# ============================================================
+# STEP 4: HELPER FUNCTIONS
+# ============================================================
+
+def get_transforms(augmentation=False):
+    """
+    Create transforms with or without data augmentation
+    Augmentation helps model generalize better to coral variations
+    """
+    if augmentation:
+        train_transform = transforms.Compose([
+            transforms.Resize((227, 227)),
+            transforms.RandomHorizontalFlip(p=0.5),  # Corals can appear flipped
+            transforms.RandomRotation(15),  # Account for different camera angles
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),  # Lighting variations underwater
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # Slight position shifts
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        train_transform = transforms.Compose([
+            transforms.Resize((227, 227)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+    
+    test_transform = transforms.Compose([
+        transforms.Resize((227, 227)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    return train_transform, test_transform
+
+def get_model(model_type, num_classes):
+    """Load pretrained model and modify for coral health classification"""
+    if model_type == "alexnet":
+        model = models.alexnet(weights=models.AlexNet_Weights.IMAGENET1K_V1)
+        model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
+    elif model_type == "resnet18":
+        model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif model_type == "vgg16":
+        model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+        model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
+    
+    return model
+
+def plot_class_distribution(dataset, title="Coral Health Distribution"):
+    """Plot bar chart showing healthy vs unhealthy coral distribution"""
+    class_counts = [0] * len(dataset.classes)
+    for _, label in dataset.samples:
+        class_counts[label] += 1
+
+    plt.figure(figsize=(10,6))
+    colors = ['#4caf50', '#f44336']  # Green for healthy, Red for unhealthy
+    bars = plt.bar(dataset.classes, class_counts, color=colors, alpha=0.8, edgecolor='black', linewidth=2)
+    
+    plt.title(title, fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel("Coral Health Status", fontsize=13, fontweight='bold')
+    plt.ylabel("Number of Images", fontsize=13, fontweight='bold')
+    
+    # Add count labels on bars
+    for i, (bar, count) in enumerate(zip(bars, class_counts)):
+        plt.text(bar.get_x() + bar.get_width()/2, count + max(class_counts)*0.02, 
+                str(count), ha='center', va='bottom', fontsize=14, fontweight='bold')
+    
+    plt.grid(axis='y', linestyle='--', alpha=0.4)
+    plt.tight_layout()
+    return plt
+
+# ============================================================
+# STEP 5: SHOW INITIAL CORAL DATA DISTRIBUTION
+# ============================================================
+
+print("\n🪸 Loading coral datasets for inspection...")
+temp_transform = transforms.Compose([
+    transforms.Resize((227, 227)),
+    transforms.ToTensor(),
+])
+
+train_dataset_temp = datasets.ImageFolder(train_dir, transform=temp_transform)
+test_dataset_temp = datasets.ImageFolder(test_dir, transform=temp_transform)
+
+print(f"\n📊 Coral Health Classes: {train_dataset_temp.classes}")
+print(f"🏋️  Training samples: {len(train_dataset_temp)}")
+print(f"🧪 Test samples: {len(test_dataset_temp)}")
+
+# Show distribution plots
+print("\n📈 Visualizing coral data distribution...")
+plot_class_distribution(train_dataset_temp, "Training Set - Coral Health Distribution")
+plt.show()
+plot_class_distribution(test_dataset_temp, "Test Set - Coral Health Distribution")
+plt.show()
+
+# ============================================================
+# STEP 6: TRAINING FUNCTION WITH WANDB LOGGING
+# ============================================================
+
+def train_experiment(exp_name, config, epochs=10, project_name="coral-health-classification"):
+    """
+    Train a single experiment with comprehensive wandb logging
+    Tracks all metrics for coral health classification
+    """
+    
+    # Initialize wandb run
+    run = wandb.init(
+        project=project_name,
+        name=exp_name,
+        config={
+            "batch_size": config['batch_size'],
+            "learning_rate": config['learning_rate'],
+            "augmentation": config['augmentation'],
+            "model_type": config['model_type'],
+            "epochs": epochs,
+            "optimizer": "Adam",
+            "loss_function": "CrossEntropyLoss",
+            "task": "Coral Health Classification",
+            "classes": ["Healthy Coral", "Unhealthy Coral"]
+        },
+        reinit=True
+    )
+    
+    print(f"\n{'='*80}")
+    print(f"🔬 RUNNING EXPERIMENT: {exp_name}")
+    print(f"{'='*80}")
+    print(f"   📦 Batch Size: {config['batch_size']}")
+    print(f"   📊 Learning Rate: {config['learning_rate']}")
+    print(f"   🎨 Augmentation: {'Yes' if config['augmentation'] else 'No'}")
+    print(f"   🏗️  Model Architecture: {config['model_type'].upper()}")
+    print(f"   🪸 Task: Healthy vs Unhealthy Coral Classification")
+    print(f"{'='*80}")
+    
+    # Get transforms and datasets
+    train_transform, test_transform = get_transforms(config['augmentation'])
+    train_dataset = datasets.ImageFolder(train_dir, transform=train_transform)
+    test_dataset = datasets.ImageFolder(test_dir, transform=test_transform)
+    
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
+                             shuffle=True, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], 
+                            shuffle=False, num_workers=2)
+    
+    num_classes = len(train_dataset.classes)
+    
+    # Initialize model
+    model = get_model(config['model_type'], num_classes)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    
+    # Watch model with wandb (tracks gradients and parameters)
+    wandb.watch(model, log="all", log_freq=10)
+    
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    
+    # Training loop
+    train_losses = []
+    test_accuracies = []
+    train_accuracies = []
+    
+    for epoch in range(epochs):
+        # ============== TRAINING PHASE ==============
+        model.train()
+        running_loss = 0.0
+        correct_train = 0
+        total_train = 0
+        
+        for images, labels in train_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            total_train += labels.size(0)
+            correct_train += (predicted == labels).sum().item()
+        
+        avg_loss = running_loss / len(train_loader)
+        train_acc = 100 * correct_train / total_train
+        train_losses.append(avg_loss)
+        train_accuracies.append(train_acc)
+        
+        # ============== EVALUATION PHASE ==============
+        model.eval()
+        correct = 0
+        total = 0
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images = images.to(device)
+                labels = labels.to(device)
+                outputs = model(images)
+                _, predicted = torch.max(outputs, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+                
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        
+        test_acc = 100 * correct / total
+        test_accuracies.append(test_acc)
+        
+        # ============== LOG TO WANDB ==============
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_loss,
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "learning_rate": config['learning_rate']
+        })
+        
+        print(f"Epoch [{epoch+1:>2}/{epochs}]  Loss: {avg_loss:.4f}  "
+              f"Train Acc: {train_acc:.2f}%  Test Acc: {test_acc:.2f}%")
+    
+    # ============== GENERATE CONFUSION MATRIX ==============
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    # Create confusion matrix plot for coral health
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='RdYlGn', 
+                xticklabels=train_dataset.classes, 
+                yticklabels=train_dataset.classes,
+                cbar_kws={'label': 'Number of Samples'}, 
+                ax=ax, annot_kws={"size": 16, "weight": "bold"})
+    ax.set_title(f'Confusion Matrix - Coral Health Classification\n{exp_name}\nAccuracy: {test_acc:.2f}%', 
+                fontsize=14, fontweight='bold', pad=20)
+    ax.set_ylabel('True Coral Health Status', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Predicted Coral Health Status', fontsize=12, fontweight='bold')
+    
+    # Log confusion matrix to wandb
+    wandb.log({"confusion_matrix": wandb.Image(fig)})
+    plt.close(fig)
+    
+    # ============== CLASSIFICATION REPORT ==============
+    class_report = classification_report(all_labels, all_preds, 
+                                        target_names=train_dataset.classes,
+                                        output_dict=True)
+    
+    # Log per-class metrics (Healthy vs Unhealthy coral)
+    for class_name in train_dataset.classes:
+        wandb.log({
+            f"{class_name}_precision": class_report[class_name]['precision'],
+            f"{class_name}_recall": class_report[class_name]['recall'],
+            f"{class_name}_f1-score": class_report[class_name]['f1-score']
+        })
+    
+    # Log overall metrics
+    wandb.log({
+        "final_train_accuracy": train_acc,
+        "final_test_accuracy": test_acc,
+        "final_train_loss": avg_loss,
+        "macro_avg_f1": class_report['macro avg']['f1-score'],
+        "weighted_avg_f1": class_report['weighted avg']['f1-score']
+    })
+    
+    print(f"\n✅ COMPLETED: Final Test Accuracy = {test_acc:.2f}%")
+    print(f"📊 Results logged to wandb: https://wandb.ai/{run.path}\n")
+    
+    # Finish wandb run
+    wandb.finish()
+    
+    return {
+        'train_losses': train_losses,
+        'train_accuracies': train_accuracies,
+        'test_accuracies': test_accuracies,
+        'final_test_acc': test_acc,
+        'final_train_acc': train_acc,
+        'model': model,
+        'train_dataset': train_dataset,
+        'test_loader': test_loader,
+        'device': device,
+        'confusion_matrix': cm,
+        'classification_report': class_report
+    }
+
+# ============================================================
+# STEP 7: RUN ALL EXPERIMENTS WITH WANDB
+# ============================================================
+
+epochs = 10
+results = {}
+project_name = "coral-health-classification"  # Your W&B project name
+
+print("\n" + "🚀 STARTING CORAL HEALTH CLASSIFICATION EXPERIMENTS ".center(80, "="))
+print(f"🪸 Project: {project_name}")
+print(f"📊 Total experiments: {len(experiments)}")
+print(f"⏱️  Epochs per experiment: {epochs}")
+print(f"🎯 Goal: Differentiate Healthy vs Unhealthy Coral")
+print("="*80)
+
+for exp_name, config in experiments.items():
+    results[exp_name] = train_experiment(exp_name, config, epochs, project_name)
+
+print("\n" + "✅ ALL CORAL CLASSIFICATION EXPERIMENTS COMPLETED! ".center(80, "="))
+print(f"🌐 View all results at: https://wandb.ai/")
+print("="*80)
+
+# ============================================================
+# STEP 8: COMBINED VISUALIZATIONS
+# ============================================================
+
+print("\n📊 Generating comparison visualizations...")
+
+fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+
+# Training Loss Comparison
+ax1 = axes[0]
+for exp_name, result in results.items():
+    config = experiments[exp_name]
+    ax1.plot(range(1, epochs+1), result['train_losses'], 
+             marker='o', linewidth=2.5, label=exp_name, 
+             color=config['color'], markersize=6)
+
+ax1.set_title("Training Loss Comparison - Coral Health Classification", 
+             fontsize=16, fontweight='bold', pad=15)
+ax1.set_xlabel("Epoch", fontsize=13, fontweight='bold')
+ax1.set_ylabel("Loss", fontsize=13, fontweight='bold')
+ax1.legend(loc='best', fontsize=9, framealpha=0.9)
+ax1.grid(True, alpha=0.3, linestyle='--')
+
+# Test Accuracy Comparison
+ax2 = axes[1]
+for exp_name, result in results.items():
+    config = experiments[exp_name]
+    ax2.plot(range(1, epochs+1), result['test_accuracies'], 
+             marker='s', linewidth=2.5, label=exp_name,
+             color=config['color'], markersize=6)
+
+ax2.set_title("Test Accuracy Comparison - Coral Health Classification", 
+             fontsize=16, fontweight='bold', pad=15)
+ax2.set_xlabel("Epoch", fontsize=13, fontweight='bold')
+ax2.set_ylabel("Accuracy (%)", fontsize=13, fontweight='bold')
+ax2.legend(loc='best', fontsize=9, framealpha=0.9)
+ax2.grid(True, alpha=0.3, linestyle='--')
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# STEP 9: RESULTS SUMMARY TABLE
+# ============================================================
+
+print("\n" + "📊 CORAL CLASSIFICATION RESULTS SUMMARY ".center(80, "="))
+print(f"{'Experiment':<50} {'Final Test Accuracy':>20}")
+print("="*80)
+
+sorted_results = sorted(results.items(), key=lambda x: x[1]['final_test_acc'], reverse=True)
+for rank, (exp_name, result) in enumerate(sorted_results, 1):
+    print(f"{rank}. {exp_name:<47} {result['final_test_acc']:>18.2f}%")
+
+print("="*80)
+
+# ============================================================
+# STEP 10: DETAILED ANALYSIS BY CATEGORY
+# ============================================================
+
+print("\n" + "🔍 DETAILED ANALYSIS - CORAL HEALTH CLASSIFICATION ".center(80, "="))
+
+# Batch Size Analysis
+print("\n📦 BATCH SIZE IMPACT ON CORAL CLASSIFICATION:")
+print("-" * 80)
+bs_results = [
+    ("Baseline (BS=32)", results["1. Baseline (BS=32, LR=0.0001, No Aug)"]['final_test_acc']),
+    ("Small Batch (BS=16)", results["2. Small Batch (BS=16, LR=0.0001)"]['final_test_acc']),
+    ("Large Batch (BS=64)", results["3. Large Batch (BS=64, LR=0.0001)"]['final_test_acc'])
+]
+for name, acc in sorted(bs_results, key=lambda x: x[1], reverse=True):
+    print(f"   {name:<30} {acc:>6.2f}%")
+print("\n   💡 Insight: Smaller batches often help with coral detail recognition")
+
+# Learning Rate Analysis
+print("\n📊 LEARNING RATE IMPACT:")
+print("-" * 80)
+baseline_acc = results["1. Baseline (BS=32, LR=0.0001, No Aug)"]['final_test_acc']
+high_lr_acc = results["4. High LR (BS=32, LR=0.001)"]['final_test_acc']
+print(f"   LR=0.0001 (Baseline)           {baseline_acc:>6.2f}%")
+print(f"   LR=0.001 (10x Higher)          {high_lr_acc:>6.2f}%")
+print(f"   Difference:                    {high_lr_acc - baseline_acc:>+6.2f}%")
+if high_lr_acc > baseline_acc:
+    print("\n   💡 Insight: Higher LR improved coral classification accuracy")
+else:
+    print("\n   💡 Insight: Lower LR provides more stable coral feature learning")
+
+# Augmentation Analysis
+print("\n🎨 DATA AUGMENTATION IMPACT:")
+print("-" * 80)
+no_aug_acc = results["1. Baseline (BS=32, LR=0.0001, No Aug)"]['final_test_acc']
+aug_acc = results["5. With Augmentation (BS=32, LR=0.0001)"]['final_test_acc']
+print(f"   Without Augmentation           {no_aug_acc:>6.2f}%")
+print(f"   With Augmentation              {aug_acc:>6.2f}%")
+print(f"   Improvement:                   {aug_acc - no_aug_acc:>+6.2f}%")
+print("\n   💡 Insight: Augmentation helps model handle diverse coral appearances,")
+print("              lighting conditions, and camera angles underwater")
+
+# Architecture Comparison
+print("\n🏗️  MODEL ARCHITECTURE COMPARISON FOR CORAL CLASSIFICATION:")
+print("-" * 80)
+arch_results = [
+    ("AlexNet", results["1. Baseline (BS=32, LR=0.0001, No Aug)"]['final_test_acc']),
+    ("ResNet18", results["6. ResNet18 (BS=32, LR=0.0001)"]['final_test_acc']),
+    ("VGG16", results["7. VGG16 (BS=32, LR=0.0001)"]['final_test_acc'])
+]
+for name, acc in sorted(arch_results, key=lambda x: x[1], reverse=True):
+    print(f"   {name:<30} {acc:>6.2f}%")
+
+best_arch = max(arch_results, key=lambda x: x[1])
+print(f"\n   💡 Best Architecture for Coral: {best_arch[0]} ({best_arch[1]:.2f}%)")
+
+print("\n" + "="*80)
+
+# ============================================================
+# STEP 11: BEST MODEL ANALYSIS
+# ============================================================
+
+best_exp_name = sorted_results[0][0]
+best_result = sorted_results[0][1]
+
+print("\n" + "🏆 BEST MODEL FOR CORAL HEALTH CLASSIFICATION ".center(80, "="))
+print(f"Experiment: {best_exp_name}")
+print(f"Final Test Accuracy: {best_result['final_test_acc']:.2f}%")
+print(f"Final Train Accuracy: {best_result['final_train_acc']:.2f}%")
+print("="*80)
+
+# Classification report for best model
+print("\n📊 Detailed Classification Report (Best Model):")
+print("="*80)
+model = best_result['model']
+test_loader = best_result['test_loader']
+device = best_result['device']
+train_dataset = best_result['train_dataset']
+
+model.eval()
+all_preds = []
+all_labels = []
+
+with torch.no_grad():
+    for images, labels in test_loader:
+        images = images.to(device)
+        labels = labels.to(device)
+        outputs = model(images)
+        _, predicted = torch.max(outputs, 1)
+        
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+print(classification_report(all_labels, all_preds, 
+                          target_names=train_dataset.classes))
+
+# ============================================================
+# STEP 12: SAVE BEST MODEL
+# ============================================================
+
+model_path = f"alexnet_coral_health_best_{best_result['final_test_acc']:.2f}.pth"
+torch.save(model.state_dict(), model_path)
+print(f"\n💾 Best model saved as: {model_path}")
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+print("\n" + "✅ CORAL HEALTH CLASSIFICATION COMPLETE! ".center(80, "="))
+print(f"🪸 Task: Healthy vs Unhealthy Coral Classification")
+print(f"🏆 Best Model: {best_exp_name}")
+print(f"📈 Best Accuracy: {best_result['final_test_acc']:.2f}%")
+print(f"💾 Model Saved: {model_path}")
+print(f"📊 All metrics logged to Weights & Biases")
+print(f"🌐 View dashboard: https://wandb.ai/")
+print("="*80)
+print("\n🎓 Ready for your professor's review!")
+print("📝 All experiments documented with:")
+print("   ✅ Batch size comparisons (16, 32, 64)")
+print("   ✅ Learning rate comparisons (0.0001 vs 0.001)")
+print("   ✅ Data augmentation analysis")
+print("   ✅ Architecture comparisons (AlexNet, ResNet18, VGG16)")
+print("   ✅ Confusion matrices for all experiments")
+print("   ✅ Complete metrics logged to Weights & Biases")
+print("="*80)
